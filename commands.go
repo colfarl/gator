@@ -73,6 +73,8 @@ func (c *commands) initialize() {
 	c.register("register", handlerRegister)
 	c.register("reset", handlerReset)
 	c.register("users", handlerUsers)
+	c.register("agg", handlerAgg)
+	c.register("addfeed", handlerAddFeed)
 }
 
 // =========== Command Handlers ===============
@@ -160,3 +162,50 @@ func handlerUsers(s * state, cmd command) error {
 	return nil
 }
 
+func handlerAgg(s * state, cmd command) error {	
+
+	if len(cmd.Args) != 0 {
+		return fmt.Errorf("USAGE: users")
+	}
+	
+	url := "https://www.wagslane.dev/index.xml"
+	feed, err := fetchFeed(context.Background(), url)
+	if err != nil {
+		return err
+	}
+	
+	feed.unEscape()
+	feed.print()
+	return nil
+}
+
+func handlerAddFeed(s * state, cmd command) error {	
+
+	if len(cmd.Args) != 2 {
+		return fmt.Errorf("USAGE: addfeed <feed-name> <feed-url>")
+	}
+	
+
+	currUser := s.CurrentState.CurrentUserName
+	userInfo, err := s.db.GetUser(context.Background(), sql.NullString{String: currUser, Valid: true})
+	if err != nil {
+		return err
+	}
+	
+	params := database.CreateFeedParams{
+		ID: uuid.New(),
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+		Name: sql.NullString{String: cmd.Args[0], Valid: cmd.Args[0] != ""},
+		Url: sql.NullString{String: cmd.Args[1], Valid: cmd.Args[1] != ""},
+		UserID: uuid.NullUUID{UUID: userInfo.ID, Valid: true},
+	}
+
+	inserted, err := s.db.CreateFeed(context.Background(), params)
+	if err != nil {
+		return err
+	}
+	
+	fmt.Println("Successfully added feed:", inserted)
+	return nil
+}
