@@ -67,11 +67,11 @@ func Read() (Config, error) {
 }
 
 
-func SetUser(newUser string, cfg Config) error {		
+func (cfg *Config) SetUser(newUser string) error {		
 
 	cfg.CurrentUserName = newUser
 
-	err := write(cfg)
+	err := write(*cfg)
 	if err != nil {
 		return err
 	}
