@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/colfarl/gator/internal/database"
@@ -74,10 +75,15 @@ func (c *commands) initialize() {
 	c.register("reset", handlerReset)
 	c.register("users", handlerUsers)
 	c.register("agg", handlerAgg)
-	c.register("addfeed", handlerAddFeed)
+	c.register("feeds", handlerFeeds)
+	c.register("browse", middlewareLoggedIn(handlerBrowse))
+	c.register("addfeed", middlewareLoggedIn(handlerAddFeed))
+	c.register("follow", middlewareLoggedIn(handlerFollow))
+	c.register("following", middlewareLoggedIn(handlerFollowing))
+	c.register("unfollow", middlewareLoggedIn(handlerUnfollow))
 }
 
-// =========== Command Handlers ===============
+// ============================== Command Handlers ==============================  
 
 func handlerLogin(s *state, cmd command) error {
 
@@ -164,41 +170,110 @@ func handlerUsers(s * state, cmd command) error {
 
 func handlerAgg(s * state, cmd command) error {	
 
-	if len(cmd.Args) != 0 {
-		return fmt.Errorf("USAGE: users")
+	if len(cmd.Args) != 1 {
+		return fmt.Errorf("USAGE: agg <time-between-reqs: 1h, 1m, 1s...>")
 	}
 	
-	url := "https://www.wagslane.dev/index.xml"
-	feed, err := fetchFeed(context.Background(), url)
+	timeBetweenRequests, err := time.ParseDuration(cmd.Args[0])
 	if err != nil {
 		return err
 	}
+
+	ticker := time.NewTicker(timeBetweenRequests)
+	for ; ; <-ticker.C {
+		scrapeFeeds(s)
+	}
+
+}
+
+func handlerFeeds(s *state, cmd command) error {
 	
-	feed.unEscape()
-	feed.print()
+	if len(cmd.Args) != 0 {
+		return fmt.Errorf("USAGE: addfeed <feed-name> <feed-url>")
+	}
+		
+	allFeeds, err := s.db.GetFeeds(context.Background())
+	if err != nil {
+		return err
+	}
+
+	for _, v := range allFeeds {
+		creatorName, err := s.db.GetUserNameByID(context.Background(), v.UserID.UUID)
+		if err != nil {
+			return err
+		}
+		
+		fmt.Println()
+		fmt.Println("Feed Name:", v.Name)
+		fmt.Println("URL:", v.Url.String)
+		fmt.Println("Creator Name:", creatorName.String)
+		fmt.Println()
+	}
 	return nil
 }
 
-func handlerAddFeed(s * state, cmd command) error {	
+// ============================== "LOGGED IN FUNCTIONS" ============================== 
+func handlerFollow(s *state, cmd command, user database.User) error {
+
+	if len(cmd.Args) != 1 {
+		return fmt.Errorf("USAGE: follow <url>")
+	}
+	
+		
+	feedID, err := s.db.GetFeedIdByURL(context.Background(), sql.NullString{String: cmd.Args[0], Valid: cmd.Args[0] != ""})
+	if err != nil {
+		return err
+	}
+
+	params := database.CreateFeedFollowParams{
+		ID: uuid.New(),
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+		FeedID: feedID,
+		UserID:	user.ID,
+	}
+
+	createdFollow, err := s.db.CreateFeedFollow(context.Background(), params)
+	if err != nil {
+		return err
+	}
+
+	fmt.Printf("User: %s; Now following feed: %s", createdFollow.UserName.String, createdFollow.FeedName)
+	return nil 
+}
+
+func handlerFollowing(s *state, cmd command, user database.User) error {
+
+	if len(cmd.Args) != 0 {
+		return fmt.Errorf("USAGE: following")
+	}
+
+	allFollowing, err := s.db.GetFeedFollowsForUser(context.Background(), user.ID)
+	if err != nil {
+		return err
+	}
+	
+	fmt.Println("You are Currently Following:")
+	for _, v := range allFollowing {
+		fmt.Printf("	- '%s'\n", v.FeedName)
+	}
+
+	return nil
+}
+
+func handlerAddFeed(s * state, cmd command, user database.User) error {	
 
 	if len(cmd.Args) != 2 {
 		return fmt.Errorf("USAGE: addfeed <feed-name> <feed-url>")
-	}
-	
-
-	currUser := s.CurrentState.CurrentUserName
-	userInfo, err := s.db.GetUser(context.Background(), sql.NullString{String: currUser, Valid: true})
-	if err != nil {
-		return err
 	}
 	
 	params := database.CreateFeedParams{
 		ID: uuid.New(),
 		CreatedAt: time.Now(),
 		UpdatedAt: time.Now(),
-		Name: sql.NullString{String: cmd.Args[0], Valid: cmd.Args[0] != ""},
+		Name: cmd.Args[0],
 		Url: sql.NullString{String: cmd.Args[1], Valid: cmd.Args[1] != ""},
-		UserID: uuid.NullUUID{UUID: userInfo.ID, Valid: true},
+		UserID: uuid.NullUUID{UUID: user.ID, Valid: true},
 	}
 
 	inserted, err := s.db.CreateFeed(context.Background(), params)
@@ -206,6 +281,79 @@ func handlerAddFeed(s * state, cmd command) error {
 		return err
 	}
 	
-	fmt.Println("Successfully added feed:", inserted)
+	paramsFollowing := database.CreateFeedFollowParams{
+		ID: uuid.New(),
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+		FeedID: inserted.ID,
+		UserID:	user.ID,
+	}
+	
+	_, err = s.db.CreateFeedFollow(context.Background(), paramsFollowing)
+	if err != nil {
+		return err
+	}
+
+	fmt.Println("Successfully added feed:", inserted.Name)
 	return nil
 }
+
+func handlerUnfollow(s *state, cmd command, user database.User) error {
+	
+	if len(cmd.Args) != 1 {
+		return fmt.Errorf("USAGE: unfollow <url>")
+	}
+
+	feedID, err := s.db.GetFeedIdByURL(context.Background(), sql.NullString{String: cmd.Args[0], Valid: cmd.Args[0] != ""})
+	if err != nil {
+		return err
+	}
+	
+	params := database.DeleteFeedFollowParams{
+		UserID: user.ID,
+		FeedID: feedID,
+	}
+
+	err = s.db.DeleteFeedFollow(context.Background(), params)	
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func handlerBrowse(s *state, cmd command, user database.User) error {
+	
+	if len(cmd.Args) > 1 {
+		return fmt.Errorf("USAGE: browse [limit]")
+	}
+	
+	var limit int32
+	if len(cmd.Args) == 1 {
+		num, err := strconv.Atoi(cmd.Args[0])
+		limit = int32(num)
+		if err != nil {
+			return err
+		}
+	} else {
+		limit = 2
+	}
+	
+	params := database.GetPostsForUserParams{
+		UserID: user.ID, 
+		Limit: limit,
+	}
+
+	posts, err := s.db.GetPostsForUser(context.Background(), params)
+	if err != nil {
+		return err
+	}
+
+	for _, post := range posts {
+		fmt.Println()
+		prettyPost(post)
+		fmt.Println()
+	}
+	
+	return nil
+}
+
